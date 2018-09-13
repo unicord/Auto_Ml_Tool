@@ -16,14 +16,15 @@ warnings.filterwarnings("ignore", category=Warning)
 
 class Amtl(object):
     '''
-    版本2.1
-    更新内容，pca的选择，不选择pca将不进行标准化
+    版本2.3
+    更新内容修复没有数值型特征时不填空值的bug，并将自动搜索文本和数值型变为随机1000个值判断
     '''
 
     def __init__(self, train_pandas, Id, target, model='R', pca_param_s=None, pca_param_d=None,
                  fearture_list=None, one_hot_list=None, cv_dic=None):
         '''
         预创建
+
         :param train_pandas: pandas格式的训练集
         :param Id: 唯一id号，排序定位用,不参与计算
         :param target: 目标特征标题
@@ -33,8 +34,11 @@ class Amtl(object):
         :param fearture_list:  = [] list中是特征名称. 注意：输入顺序要按pandas载入的顺序输入
         :param cv_dic: ={} 是否使用cv函数寻找最佳参数，None,关闭将使用默认参数或自建模型
                     暂时只提供n_estimators ，min_child_weight和 max_depth 自动调参，更多内容可关闭手动加入模型
-        :param one_hot_list: = [] 需要进行one_hot编码的文本型特征名列表，需要注意按顺序输入
+        :param one_hot_list: = [] or ‘off’需要进行one_hot编码的文本型特征名列表，需要注意按顺序输入,
+        当为‘off’时，关闭所有one_hot编码,将直接使用转换后数值进行计算
+        注释：
         '''
+
         logging.getLogger().setLevel(logging.INFO)  #日志打印级别
         self.Id = Id
         self.target = target
@@ -97,12 +101,10 @@ class Amtl(object):
         logging.info("{0}:正在检查分离数值型和文本型特征".format(self.now_time()))
         for i in self.laber_list:
             try:
-                if self.train_dataset.mean()[i]:
+                if self.train_dataset[:1000].mean()[i]:
                     self.laber_list_D.append(i)
             except:
                 self.laber_list_S.append(i)
-        logging.info("{0}:文本型特征为{1}".format(self.now_time(), self.laber_list_S))
-
 
     def one_hot_prepare(self):
         #self.train_dataset_loc 将文本替换为0，1，2
@@ -124,35 +126,38 @@ class Amtl(object):
             self.laber_list_S.remove(self.Id)
         if self.Id in self.laber_list_D:
             self.laber_list_D.remove(self.Id)
-
         if self.target in self.laber_list_S:
             self.laber_list_S.remove(self.target)
         if self.target in self.laber_list_D:
             self.laber_list_D.remove(self.target)
-
-        if self.one_hot_param is None:
+        logging.info("{0}:文本型特征为{1}".format(self.now_time(), self.laber_list_S))
+        logging.info("{0}:数值型特征为{1}".format(self.now_time(), self.laber_list_D))
+        if self.one_hot_param is None or self.one_hot_param == 'off':
             self.laber_list_SA = self.laber_list_S
+
         else:
             self.laber_list_SA = self.one_hot_param
             self.laber_list_SB = copy.deepcopy(self.laber_list_S)
             for i in self.laber_list_SA:
                 self.laber_list_SB.remove(i)
 
+
+
     def imputer(self):
 
-        if self.laber_list_SA is not None:
+        if self.laber_list_SA is not None and self.laber_list_SA != []:
             self.train_dataset_loc_SA = self.train_dataset_loc[self.laber_list_SA]
             imp_S = Imputer(missing_values='NaN', strategy='median', axis=0)
             imp_S.fit(self.train_dataset_loc_SA)
             self.train_dataset_loc_S = imp_S.transform(self.train_dataset_loc_SA).astype('int')
 
-        if self.laber_list_SB is not None:
+        if self.laber_list_SB is not None and self.laber_list_SB != []:
             self.train_dataset_loc_SB = self.train_dataset_loc[self.laber_list_SB]
             imp_S = Imputer(missing_values='NaN', strategy='median', axis=0)
             imp_S.fit(self.train_dataset_loc_SB)
             self.train_dataset_loc_SB = imp_S.transform(self.train_dataset_loc_SB).astype('int')
 
-        if self.laber_list_D != '':
+        if self.laber_list_D != []:
             self.train_dataset_loc_D = self.train_dataset_loc[self.laber_list_D]
             imp_D = Imputer(missing_values='NaN', strategy='mean', axis=0)
             imp_D.fit(self.train_dataset_loc_D)
@@ -160,18 +165,21 @@ class Amtl(object):
             if self.laber_list_SB is not None:
                 self.train_dataset_loc_D = np.hstack((self.train_dataset_loc_D, self.train_dataset_loc_SB))
 
+        elif self.laber_list_D == [] and self.laber_list_SB is not None and self.laber_list_SB != []:
+            self.train_dataset_loc_D = self.train_dataset_loc_SB
+
     def one_hot_deal(self):
         self.ohe = OneHotEncoder()
 
-        if self.train_dataset_loc_S is not None:
+        if self.train_dataset_loc_S is not None and self.one_hot_param != 'off':
             logging.info("{0}:对{1}进行one_hot编码".format(self.now_time(), self.laber_list_SA))
             self.ohe.fit(self.train_dataset_loc_S)
             self.train_dataset_loc_S = self.ohe.transform(self.train_dataset_loc_S).toarray()
 
     def standardScaler(self):
         #数据标准化
-        self.std_d = None
-        self.std_s = None
+        self.std_D = None
+        self.std_S = None
         if self.train_dataset_loc_D is not None:
             self.std_D = StandardScaler()
             if self.pca_param_d is not None:
@@ -191,44 +199,39 @@ class Amtl(object):
     def PCA(self):
         #pca降维
         #白化一般用于图片处理，这里暂不使用
-        if self.train_dataset_loc_D is not None:
+        if self.pca_param_d is None or self.train_dataset_loc_D is  None:
+            logging.info("{0}:数值型不进行降维".format(self.now_time()))
+        else:
+            logging.info("{0}:数值型降维前维度:{1},信息保留比例{2}".format(self.now_time(),
+                len(self.train_dataset_loc_D[0]), self.pca_param_d))
+            self.pca_D = PCA(n_components=self.pca_param_d, svd_solver='full')
+            self.pca_D.fit(self.train_dataset_loc_D)
+            self.train_dataset_loc_D = self.pca_D.transform(self.train_dataset_loc_D)
+            logging.info("{0}:数值型降维后维度:{1}".format(self.now_time(),
+                len(self.train_dataset_loc_D[0])))
 
-            if self.pca_param_d is None:
-                logging.info("{0}:数值型不进行降维".format(self.now_time()))
-            else:
-                logging.info("{0}:数值型降维前维度:{1},信息保留比例{2}".format(self.now_time(),
-                     len(self.train_dataset_loc_D[0]), self.pca_param_d))
-                self.pca_D = PCA(n_components=self.pca_param_d, svd_solver='full')
-                self.pca_D.fit(self.train_dataset_loc_D)
-                self.train_dataset_loc_D = self.pca_D.transform(self.train_dataset_loc_D)
+        if self.pca_param_s is None or self.train_dataset_loc_S is None:
+            logging.info("{0}:文本型不进行降维".format(self.now_time()))
+        else:
+            logging.info("{0}:文本型降维前维度:{1},信息保留比例{2}".format(self.now_time(),
+                len(self.train_dataset_loc_S[0]), self.pca_param_s))
+            self.pca_S = PCA(n_components=self.pca_param_s, svd_solver='full')
+            self.pca_S.fit(self.train_dataset_loc_S)
+            self.train_dataset_loc_S = self.pca_S.transform(self.train_dataset_loc_S)
+            logging.info("{0}:文本型降维后维度:{1}".format(self.now_time(),
+                                                          len(self.train_dataset_loc_S[0])))
 
-
-                logging.info("{0}:数值型降维后维度:{1}".format(self.now_time(),
-                                               len(self.train_dataset_loc_D[0])))
-
-        if self.train_dataset_loc_S is not None:
-            if self.pca_param_s is None:
-                logging.info("{0}:文本型不进行降维".format(self.now_time()))
-            else:
-                logging.info("{0}:文本型降维前维度:{1},信息保留比例{2}".format(self.now_time(),
-                     len(self.train_dataset_loc_S[0]), self.pca_param_s))
-
-                self.pca_S = PCA(n_components=self.pca_param_s, svd_solver='full')
-                self.pca_S.fit(self.train_dataset_loc_S)
-
-                self.train_dataset_loc_S = self.pca_S.transform(self.train_dataset_loc_S)
-
-                logging.info("{0}:one_hot文本型降维后维度:{1}".format(self.now_time(),
-                                               len(self.train_dataset_loc_S[0])))
 
     def reshape(self):
-        #合并数据，对数值型进行降维
+        #合并数据
+
         if self.train_dataset_loc_D is not None and self.train_dataset_loc_S is not None:
             self.X_train = np.hstack((self.train_dataset_loc_D, self.train_dataset_loc_S))
         elif self.train_dataset_loc_D is not None:
             self.X_train = self.train_dataset_loc_D
         else:
             self.X_train = self.train_dataset_loc_S
+
 
     def creat_model(self):
         #建立默认模型
@@ -251,10 +254,11 @@ class Amtl(object):
                                     learning_rate=grid_search.best_params_['learning_rate'])
 
         elif self.model == 'R':
-            grid_search = GridSearchCV(estimator=self.rf, param_grid=self.cv_param)
+            grid_search = GridSearchCV(estimator=self.rf, param_grid=self.cv_param, scoring='neg_mean_absolute_error')
+
             grid_search.fit(self.X_train, self.Y_train)
             logging.info("{0}:最优参数:{1}".format(self.now_time(), grid_search.best_params_))
-            logging.info("{0}:最优参数acc结果:{1}".format(self.now_time(), grid_search.best_score_))
+            logging.info("{0}:最优参数R平方结果:{1}".format(self.now_time(), grid_search.best_score_))
             self.rf = XGBRegressor(n_estimators=grid_search.best_params_['n_estimators'],
                                     max_depth=grid_search.best_params_['max_depth'],
                                     min_child_weight=grid_search.best_params_['min_child_weight'],
@@ -307,7 +311,7 @@ class Amtl_predict(object):
     def load_param(self):
         self.rf, self.laber_list_S, self.laber_dir_S, self.ohe, self.Id, self.target, \
         self.laber_list_SA, self.laber_list_SB, self.pca_D, self.pca_S,\
-        self.one_hot_param, self.laber_list_D, self.std_D, self.std_S ,\
+        self.one_hot_param, self.laber_list_D, self.std_D, self.std_S,\
         self.pca_param_d, self.pca_param_s\
             = pickle.load(open(self.model_path, mode='rb'))
 
@@ -329,19 +333,19 @@ class Amtl_predict(object):
 
     def imputer(self):
 
-        if self.laber_list_SA is not None:
+        if self.laber_list_SA is not None and self.laber_list_SA != []:
             self.test_dataset_loc_SA = self.test_dataset_loc[self.laber_list_SA]
             imp_S = Imputer(missing_values='NaN', strategy='median', axis=0)
             imp_S.fit(self.test_dataset_loc_SA)
             self.test_dataset_loc_S = imp_S.transform(self.test_dataset_loc_SA).astype('int')
 
-        if self.laber_list_SB is not None:
+        if self.laber_list_SB is not None and self.laber_list_SB != []:
             self.test_dataset_loc_SB = self.test_dataset_loc[self.laber_list_SB]
             imp_S = Imputer(missing_values='NaN', strategy='median', axis=0)
             imp_S.fit(self.test_dataset_loc_SB)
             self.test_dataset_loc_SB = imp_S.transform(self.test_dataset_loc_SB).astype('int')
 
-        if self.laber_list_D != '':
+        if self.laber_list_D != []:
             self.test_dataset_loc_D = self.test_dataset_loc[self.laber_list_D]
             imp_D = Imputer(missing_values='NaN', strategy='mean', axis=0)
             imp_D.fit(self.test_dataset_loc_D)
@@ -350,7 +354,7 @@ class Amtl_predict(object):
                 self.test_dataset_loc_D = np.hstack((self.test_dataset_loc_D, self.test_dataset_loc_SB))
 
     def one_hot_deal(self):
-        if self.test_dataset_loc_S is not None:
+        if self.test_dataset_loc_S is not None and self.one_hot_param != 'off':
             self.test_dataset_loc_S = self.ohe.transform(self.test_dataset_loc_S).toarray()
 
     def standardScaler(self):
